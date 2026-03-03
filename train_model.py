@@ -1,99 +1,78 @@
 """
-从 data/ 下按子文件夹读取类别，训练 MobileNetV2 分类模型。
-类别数不固定：任意 data/<类别名> 均可，训练后会把类别列表写入 model_classes.json 供推理使用。
+从零训练一个简单 CNN（无预训练权重）：
+- 数据：data/ 下按文件夹分类，少量数据增强
+- 模型：五层卷积 + 池化 + 全连接，权重随机初始化，自己学特征
+- 训练：单阶段、固定学习率
 """
 import json
 import os
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.utils import class_weight
 import tensorflow as tf
 from tensorflow.keras import layers, models
-from tensorflow.keras.applications import MobileNetV2
-from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 
 from config import (
-    DATA_DIR,
     IMAGE_SIZE,
     MODEL_PATH,
-    MODEL_FINAL_PATH,
+    MODEL_META_JSON,
     CLASSES_JSON,
     BATCH_SIZE,
     SEED,
     VALIDATION_SPLIT,
     INITIAL_EPOCHS,
-    FINE_TUNE_EPOCHS,
-    FINE_TUNE_AT_LAYERS,
 )
+from train_utils import load_data, save_class_names, get_class_weights
 
 # ----- 加载数据集 -----
-train_ds = tf.keras.utils.image_dataset_from_directory(
-    DATA_DIR,
-    validation_split=VALIDATION_SPLIT,
-    subset="training",
-    seed=SEED,
-    image_size=IMAGE_SIZE,
-    batch_size=BATCH_SIZE,
-    color_mode="rgb",
-)
+train_ds_raw, val_ds_raw, class_names, num_classes, train_labels = load_data()
 
-val_ds = tf.keras.utils.image_dataset_from_directory(
-    DATA_DIR,
-    validation_split=VALIDATION_SPLIT,
-    subset="validation",
-    seed=SEED,
-    image_size=IMAGE_SIZE,
-    batch_size=BATCH_SIZE,
-    color_mode="rgb",
-)
+print("Class:", class_names, "->", num_classes, "classes")
+save_class_names(class_names)
 
-# 类别名与训练时顺序一致（按目录名字母序）
-class_names = train_ds.class_names
-num_classes = len(class_names)
-print("Classes found:", class_names, "->", num_classes, "classes")
+# 从零训练的模型用简单 [0, 1] 归一化，推理时也用同一方式
+with open(MODEL_META_JSON, "w", encoding = "UTF-8") as f:
+    json.dump({"preprocess": "custom"}, f, indent = 2)
 
-# 保存类别列表，推理时读取，避免顺序不一致
-with open(CLASSES_JSON, "w", encoding="utf-8") as f:
-    json.dump(class_names, f, ensure_ascii=False, indent=2)
-print("Saved class names to", CLASSES_JSON)
+class_weights = get_class_weights(train_labels)
+print("Class weights:", class_weights)
 
-# ----- 数据管道 -----
 AUTOTUNE = tf.data.AUTOTUNE
-train_ds = train_ds.cache().shuffle(1000).prefetch(buffer_size=AUTOTUNE)
-val_ds = val_ds.cache().prefetch(buffer_size=AUTOTUNE)
+train_ds = (
+    train_ds_raw.cache()
+    .shuffle(1000)
+    .prefetch(buffer_size = AUTOTUNE)
+)
+val_ds = val_ds_raw.cache().prefetch(buffer_size = AUTOTUNE)
 
 # ----- 数据增强 -----
 data_augmentation = tf.keras.Sequential([
     layers.RandomFlip("horizontal"),
     layers.RandomRotation(0.3),
-    layers.RandomZoom(0.3),
-    layers.RandomContrast(0.2),
-    layers.RandomBrightness(0.2),
-    layers.RandomTranslation(0.1, 0.1),
 ])
 
-# ----- 基座 + 分类头 -----
-base_model = MobileNetV2(
-    input_shape=(IMAGE_SIZE[0], IMAGE_SIZE[1], 3),
-    include_top=False,
-    weights="imagenet",
-)
-base_model.trainable = False
-
+# ----- 从零训练的小型 CNN（无预训练） ----
+# 输入 0~255，模型内先 Rescaling 到 [0, 1]，再卷积三次
 model = models.Sequential([
     data_augmentation,
-    layers.Lambda(preprocess_input, input_shape=(IMAGE_SIZE[0], IMAGE_SIZE[1], 3)),
-    base_model,
-    layers.GlobalAveragePooling2D(),
-    layers.Dense(128, activation="relu", kernel_regularizer=tf.keras.regularizers.l2(1e-4)),
-    layers.Dropout(0.3),
+    layers.Rescaling(1.0 / 255, input_shape = (IMAGE_SIZE[0], IMAGE_SIZE[1], 3)),
+    layers.Conv2D(32, (3, 3), padding = "same", activation = "relu"),
+    layers.MaxPooling2D((2, 2)),
+    layers.Dropout(0.2),
+
+    layers.Conv2D(64, (3, 3), padding = "same", activation = "relu"),
+    layers.MaxPooling2D((2, 2)),
+    layers.Dropout(0.2),
+
+    layers.Flatten(),
+    layers.Dense(128, activation="relu"),
+    layers.Dropout(0.5),
     layers.Dense(num_classes, activation="softmax"),
 ])
 model.summary()
 
-# ----- 编译与回调 -----
+# ----- 编译与训练 -----
 model.compile(
-    optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
+    optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
     loss="sparse_categorical_crossentropy",
     metrics=["accuracy"],
 )
@@ -110,78 +89,57 @@ callbacks = [
         restore_best_weights=True,
         monitor="val_loss",
     ),
-    tf.keras.callbacks.ReduceLROnPlateau(
-        monitor="val_loss",
-        factor=0.5,
-        patience=3,
-        min_lr=1e-7,
-    ),
 ]
 
-# ----- 类别权重 -----
-train_labels = np.concatenate([y.numpy() for _, y in train_ds], axis=0)
-weights = class_weight.compute_class_weight(
-    class_weight="balanced",
-    classes=np.unique(train_labels),
-    y=train_labels,
-)
-class_weights = dict(enumerate(weights))
-print("Class weights:", class_weights)
-
-# ----- 第一阶段：只训头 -----
 history = model.fit(
     train_ds,
-    validation_data=val_ds,
-    epochs=INITIAL_EPOCHS,
-    callbacks=callbacks,
-    class_weight=class_weights,
+    validation_data = val_ds,
+    epochs = INITIAL_EPOCHS,
+    callbacks = callbacks,
+    class_weight = class_weights,
 )
 
 # ----- 训练曲线 -----
-acc = history.history["accuracy"]
-val_acc = history.history["val_accuracy"]
-loss = history.history["loss"]
-val_loss = history.history["val_loss"]
-epochs_range = range(len(acc))
-
 plt.figure(figsize=(10, 4))
 plt.subplot(1, 2, 1)
-plt.plot(epochs_range, acc, label="Train Acc")
-plt.plot(epochs_range, val_acc, label="Val Acc")
+plt.plot(history.history["accuracy"], label="Train Acc")
+plt.plot(history.history["val_accuracy"], label="Val Acc")
 plt.legend()
 plt.title("Accuracy")
 plt.subplot(1, 2, 2)
-plt.plot(epochs_range, loss, label="Train Loss")
-plt.plot(epochs_range, val_loss, label="Val Loss")
+plt.plot(history.history["loss"], label="Train Loss")
+plt.plot(history.history["val_loss"], label="Val Loss")
 plt.legend()
 plt.title("Loss")
+plt.tight_layout()
+plt.savefig("training_curves_basic.png", dpi = 120)
 plt.show()
 
-# ----- 第二阶段：微调 base 最后几层 -----
-base_model.trainable = True
-fine_tune_at = len(base_model.layers) - FINE_TUNE_AT_LAYERS
-for layer in base_model.layers[:fine_tune_at]:
-    layer.trainable = False
-for layer in base_model.layers[fine_tune_at:]:
-    layer.trainable = True
+# # ----- 第二阶段：微调 base 最后几层 -----
+# base_model.trainable = True
+# fine_tune_at = len(base_model.layers) - FINE_TUNE_AT_LAYERS
+# for layer in base_model.layers[:fine_tune_at]:
+#     layer.trainable = False
+# for layer in base_model.layers[fine_tune_at:]:
+#     layer.trainable = True
 
-model.compile(
-    optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5),
-    loss="sparse_categorical_crossentropy",
-    metrics=["accuracy"],
-)
+# model.compile(
+#     optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5),
+#     loss="sparse_categorical_crossentropy",
+#     metrics=["accuracy"],
+# )
 
-total_epochs = INITIAL_EPOCHS + FINE_TUNE_EPOCHS
-history_fine = model.fit(
-    train_ds,
-    validation_data=val_ds,
-    epochs=total_epochs,
-    initial_epoch=history.epoch[-1],
-    callbacks=callbacks,
-)
+# total_epochs = INITIAL_EPOCHS + FINE_TUNE_EPOCHS
+# history_fine = model.fit(
+#     train_ds,
+#     validation_data=val_ds,
+#     epochs=total_epochs,
+#     initial_epoch=history.epoch[-1],
+#     callbacks=callbacks,
+# )
 
 # ----- 保存：最佳权重已在 ModelCheckpoint 中保存为 model.keras -----
 # 最后一轮单独保存，避免覆盖“最佳模型”
-model.save(MODEL_FINAL_PATH)
+# model.save(MODEL_FINAL_PATH)
 print("Best model (by val_accuracy) saved to:", MODEL_PATH)
-print("Final epoch weights saved to:", MODEL_FINAL_PATH)
+# print("Final epoch weights saved to:", MODEL_FINAL_PATH)

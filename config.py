@@ -8,6 +8,7 @@ DATA_DIR = "data"
 MODEL_PATH = "model.keras"
 MODEL_FINAL_PATH = "model_final.keras"   # 最后一轮权重（可选保留）
 CLASSES_JSON = "model_classes.json"     # 训练时写入，推理时读取，保证类别顺序一致
+MODEL_META_JSON = "model_meta.json"     # 模型元信息（如预处理方式）
 
 # 图像与模型结构
 IMAGE_SIZE = (224, 224)   # MobileNetV2 推荐
