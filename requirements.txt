@@ -1,0 +1,8 @@
+# 图像分类项目依赖
+tensorflow>=2.10
+opencv-python>=4.5
+numpy>=1.21
+matplotlib>=3.5
+scikit-learn>=1.0
+Pillow>=9.0
+icrawler>=0.6
