@@ -63,6 +63,10 @@ model = models.Sequential([
     layers.MaxPooling2D((2, 2)),
     layers.Dropout(0.2),
 
+    layers.Conv2D(96, (3, 3), padding = "same", activation = "relu"),
+    layers.MaxPooling2D((2, 2)),
+    layers.Dropout(0.2),
+
     layers.Flatten(),
     layers.Dense(128, activation="relu"),
     layers.Dropout(0.5),
@@ -96,7 +100,7 @@ history = model.fit(
     validation_data = val_ds,
     epochs = INITIAL_EPOCHS,
     callbacks = callbacks,
-    class_weight = class_weights,
+    class_weight = class_weight,
 )
 
 # ----- 训练曲线 -----
