@@ -104,7 +104,7 @@ history = model.fit(
     validation_data = val_ds,
     epochs = INITIAL_EPOCHS,
     callbacks = callbacks,
-    class_weight = class_weight,
+    class_weight = class_weights,
 )
 
 # ----- 训练曲线 -----
