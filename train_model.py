@@ -48,6 +48,10 @@ val_ds = val_ds_raw.cache().prefetch(buffer_size = AUTOTUNE)
 data_augmentation = tf.keras.Sequential([
     layers.RandomFlip("horizontal"),
     layers.RandomRotation(0.3),
+    layers.RandomZoom(0.1),
+    layers.RandomContrast(0.2),
+    layers.RandomBrightness(0.2),
+
 ])
 
 # ----- 从零训练的小型 CNN（无预训练） ----
